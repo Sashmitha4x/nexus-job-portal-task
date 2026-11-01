@@ -11,18 +11,34 @@ import {
   apiAuthRequest,
   apiSubmitApplication,
   apiToggleArchiveApplication,
+  apiRespondToOffer,
   apiSaveCompanyProfile,
   apiCreateJob,
   apiUpdateJob,
   apiDeleteJob,
   apiUpdateApplicationStatus,
   pingHealth,
-  apiRespondToOffer,
 } from "../services/nexusService.js";
 import {
   FALLBACK_JOBS,
   FALLBACK_COMPANIES,
 } from "../constants/nexusConstants.js";
+
+const VALID_VIEWS = ["jobs", "companies", "auth", "seeker", "employer", "admin"];
+
+const getInitialViewFromHash = (currentUser) => {
+  const rawHash = window.location.hash.replace(/^#\/?/, "").split("?")[0];
+  if (VALID_VIEWS.includes(rawHash)) {
+    if (
+      (rawHash === "seeker" || rawHash === "employer" || rawHash === "admin") &&
+      !currentUser
+    ) {
+      return "jobs";
+    }
+    return rawHash;
+  }
+  return "jobs";
+};
 
 export function useNexusPortal() {
   const [user, setUser] = useState(() => {
@@ -35,7 +51,13 @@ export function useNexusPortal() {
   });
 
   // Views: "jobs" | "companies" | "auth" | "seeker" | "employer" | "admin"
-  const [activeView, setActiveView] = useState("jobs");
+  const [activeView, setActiveViewState] = useState(() =>
+    getInitialViewFromHash(
+      localStorage.getItem("nexus_user")
+        ? JSON.parse(localStorage.getItem("nexus_user"))
+        : null
+    )
+  );
   const [pendingAction, setPendingAction] = useState(null);
 
   const [jobs, setJobs] = useState(FALLBACK_JOBS);
@@ -46,11 +68,11 @@ export function useNexusPortal() {
 
   // Selected Job & Quick-Apply Modal
   const [selectedJobId, setSelectedJobId] = useState("JOB-2026-001");
-  const [mobileJobDrawerOpen, setMobileJobDrawerOpen] = useState(false);
-  const [quickApplyJob, setQuickApplyJob] = useState(null);
+  const [mobileJobDrawerOpen, setMobileJobDrawerOpenState] = useState(false);
+  const [quickApplyJob, setQuickApplyJobState] = useState(null);
 
   // Selected Company for Public Company Profile Modal
-  const [inspectedCompany, setInspectedCompany] = useState(null);
+  const [inspectedCompany, setInspectedCompanyState] = useState(null);
 
   const [bookmarkedJobIds, setBookmarkedJobIds] = useState(() => {
     const saved = localStorage.getItem("nexus_bookmarks");
@@ -86,6 +108,143 @@ export function useNexusPortal() {
     setToast((p) => ({ ...p, visible: false }));
   }, []);
 
+  // ============================================================================
+  // BROWSER HISTORY (BACK / FORWARD BUTTON) SYNCHRONIZATION
+  // ============================================================================
+  const isPopStateRef = useRef(false);
+
+  // Initialize base history entry on mount so Back never exits the app unexpectedly
+  useEffect(() => {
+    const initialState = {
+      view: activeView,
+      mobileDrawer: false,
+      companyId: null,
+      quickApplyJobId: null,
+    };
+    window.history.replaceState(initialState, "", `#${activeView}`);
+
+    const handlePopState = (event) => {
+      isPopStateRef.current = true;
+      const state = event.state;
+
+      if (state && state.view) {
+        setMobileJobDrawerOpenState(Boolean(state.mobileDrawer));
+        if (!state.companyId) setInspectedCompanyState(null);
+        if (!state.quickApplyJobId) setQuickApplyJobState(null);
+        setActiveViewState(state.view);
+      } else {
+        // Fallback if user pressed Back to the very first entry
+        const hashView = window.location.hash.replace(/^#\/?/, "");
+        setMobileJobDrawerOpenState(false);
+        setInspectedCompanyState(null);
+        setQuickApplyJobState(null);
+        setActiveViewState(VALID_VIEWS.includes(hashView) ? hashView : "jobs");
+      }
+
+      setTimeout(() => {
+        isPopStateRef.current = false;
+      }, 50);
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // History-aware view setter (enables Desktop Back/Forward & Mobile Back navigation)
+  const setActiveView = useCallback(
+    (nextView) => {
+      setActiveViewState((prevView) => {
+        const resolved =
+          typeof nextView === "function" ? nextView(prevView) : nextView;
+        if (!isPopStateRef.current && resolved !== prevView) {
+          window.history.pushState(
+            {
+              view: resolved,
+              mobileDrawer: false,
+              companyId: null,
+              quickApplyJobId: null,
+            },
+            "",
+            `#${resolved}`
+          );
+        }
+        return resolved;
+      });
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    },
+    []
+  );
+
+  // History-aware Mobile Job Dossier Drawer setter (Back button closes drawer!)
+  const setMobileJobDrawerOpen = useCallback(
+    (open) => {
+      setMobileJobDrawerOpenState((prev) => {
+        const next = typeof open === "function" ? open(prev) : open;
+        if (!isPopStateRef.current && next !== prev) {
+          if (next) {
+            window.history.pushState(
+              {
+                view: activeView,
+                mobileDrawer: true,
+                companyId: null,
+                quickApplyJobId: null,
+              },
+              "",
+              `#${activeView}`
+            );
+          }
+        }
+        return next;
+      });
+    },
+    [activeView]
+  );
+
+  // History-aware Company Modal setter (Back button closes modal!)
+  const setInspectedCompany = useCallback(
+    (comp) => {
+      setInspectedCompanyState((prev) => {
+        if (!isPopStateRef.current && comp && !prev) {
+          window.history.pushState(
+            {
+              view: activeView,
+              mobileDrawer: false,
+              companyId: comp.companyId,
+              quickApplyJobId: null,
+            },
+            "",
+            `#${activeView}`
+          );
+        }
+        return comp;
+      });
+    },
+    [activeView]
+  );
+
+  // History-aware Quick-Apply Modal setter (Back button closes modal!)
+  const setQuickApplyJob = useCallback(
+    (job) => {
+      setQuickApplyJobState((prev) => {
+        if (!isPopStateRef.current && job && !prev) {
+          window.history.pushState(
+            {
+              view: activeView,
+              mobileDrawer: false,
+              companyId: null,
+              quickApplyJobId: job.jobId,
+            },
+            "",
+            `#${activeView}`
+          );
+        }
+        return job;
+      });
+    },
+    [activeView]
+  );
+
   // Listen for instant Force-Logout when Admin suspends a logged-in account
   useEffect(() => {
     const onForceLogout = (e) => {
@@ -93,17 +252,21 @@ export function useNexusPortal() {
       localStorage.removeItem("nexus_user");
       setUser(null);
       setApplications([]);
-      setQuickApplyJob(null);
+      setPlatformUsers([]);
+      setAuditLogs([]);
+      setQuickApplyJobState(null);
       setActiveView("auth");
       showToast(
         e.detail?.title || "Account Suspended",
-        e.detail?.message || "Your account has been suspended by an administrator.",
+        e.detail?.message ||
+          "Your account has been suspended by an administrator.",
         true
       );
     };
     window.addEventListener("nexus:force-logout", onForceLogout);
-    return () => window.removeEventListener("nexus:force-logout", onForceLogout);
-  }, [showToast]);
+    return () =>
+      window.removeEventListener("nexus:force-logout", onForceLogout);
+  }, [showToast, setActiveView]);
 
   useEffect(() => {
     if (!toast.visible) return;
@@ -131,7 +294,7 @@ export function useNexusPortal() {
     setCompanies(companiesRes);
   }, [user]);
 
-const loadUserWorkspaceData = useCallback(async () => {
+  const loadUserWorkspaceData = useCallback(async () => {
     if (!user || !localStorage.getItem("nexus_token")) {
       setApplications([]);
       setPlatformUsers([]);
@@ -190,9 +353,12 @@ const loadUserWorkspaceData = useCallback(async () => {
 
     const list = jobs.filter((job) => {
       if (job.status !== "Active") return false;
-      if (workModeFilter !== "ALL" && job.workMode !== workModeFilter) return false;
-      if (categoryFilter !== "ALL" && job.category !== categoryFilter) return false;
-      if (jobTypeFilter !== "ALL" && job.jobType !== jobTypeFilter) return false;
+      if (workModeFilter !== "ALL" && job.workMode !== workModeFilter)
+        return false;
+      if (categoryFilter !== "ALL" && job.category !== categoryFilter)
+        return false;
+      if (jobTypeFilter !== "ALL" && job.jobType !== jobTypeFilter)
+        return false;
       if (minSal > 0 && job.salaryMax < minSal) return false;
       if (companyFilterId && job.companyId !== companyFilterId) return false;
 
@@ -203,7 +369,12 @@ const loadUserWorkspaceData = useCallback(async () => {
         const matchesSkills = (job.skills || []).some((s) =>
           s.toLowerCase().includes(q)
         );
-        if (!matchesTitle && !matchesCompany && !matchesId && !matchesSkills) {
+        if (
+          !matchesTitle &&
+          !matchesCompany &&
+          !matchesId &&
+          !matchesSkills
+        ) {
           return false;
         }
       }
@@ -225,7 +396,8 @@ const loadUserWorkspaceData = useCallback(async () => {
     } else {
       list.sort(
         (a, b) =>
-          new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+          new Date(b.createdAt || 0).getTime() -
+          new Date(a.createdAt || 0).getTime()
       );
     }
 
@@ -327,7 +499,6 @@ const loadUserWorkspaceData = useCallback(async () => {
     [showToast]
   );
 
-  // Trigger Apply for Job (Opens Quick-Apply Modal if logged in as Seeker; otherwise routes to Auth)
   const handleTriggerApplyForJob = useCallback(
     (job) => {
       if (!user) {
@@ -336,13 +507,12 @@ const loadUserWorkspaceData = useCallback(async () => {
           jobId: job.jobId,
           jobTitle: job.title,
         });
+        setMobileJobDrawerOpenState(false);
         setActiveView("auth");
-        setMobileJobDrawerOpen(false);
         showToast(
           "Sign In or Register to Apply",
           `Sign in as a Job Seeker to complete your application for ${job.title} (#${job.jobId}).`
         );
-        window.scrollTo({ top: 0, behavior: "smooth" });
         return;
       }
       if (user.role !== "seeker") {
@@ -354,10 +524,10 @@ const loadUserWorkspaceData = useCallback(async () => {
         return;
       }
       setSelectedJobId(job.jobId);
+      setMobileJobDrawerOpenState(false);
       setQuickApplyJob(job);
-      setMobileJobDrawerOpen(false);
     },
-    [user, showToast]
+    [user, showToast, setActiveView, setQuickApplyJob]
   );
 
   const handleTriggerPostJob = useCallback(() => {
@@ -368,7 +538,6 @@ const loadUserWorkspaceData = useCallback(async () => {
         "Employer Sign-In Required",
         "Sign in or register an Employer account to publish job openings and manage your company profile."
       );
-      window.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
     if (user.role === "employer") {
@@ -382,17 +551,19 @@ const loadUserWorkspaceData = useCallback(async () => {
         true
       );
     }
-  }, [user, showToast]);
+  }, [user, showToast, setActiveView]);
 
-  const handleFilterJobsByCompany = useCallback((company) => {
-    setCompanyFilterId(company.companyId);
-    setInspectedCompany(null);
-    setActiveView("jobs");
-    setCurrentPage(1);
-    window.scrollTo({ top: 320, behavior: "smooth" });
-  }, []);
+  const handleFilterJobsByCompany = useCallback(
+    (company) => {
+      setCompanyFilterId(company.companyId);
+      setInspectedCompanyState(null);
+      setActiveView("jobs");
+      setCurrentPage(1);
+      window.scrollTo({ top: 320, behavior: "smooth" });
+    },
+    [setActiveView]
+  );
 
-  // Authentication Handler (Sign In & Register)
   const handleAuthenticate = async (mode, payload) => {
     try {
       const endpoint = mode === "signin" ? "login" : "register";
@@ -408,13 +579,11 @@ const loadUserWorkspaceData = useCallback(async () => {
         `Welcome ${res.user.name}! Logged in as ${res.user.role.toUpperCase()}.`
       );
 
-      // Route user based on role and any pending Guest intent
       if (res.user.role === "admin") {
         setActiveView("admin");
       } else if (res.user.role === "employer") {
         setActiveView("employer");
       } else {
-        // Seeker
         if (pendingAction?.type === "apply" && pendingAction.jobId) {
           const target = jobs.find((j) => j.jobId === pendingAction.jobId);
           setSelectedJobId(pendingAction.jobId);
@@ -425,7 +594,6 @@ const loadUserWorkspaceData = useCallback(async () => {
         }
       }
       setPendingAction(null);
-      window.scrollTo({ top: 0, behavior: "smooth" });
       return true;
     } catch (err) {
       showToast("Authentication Error", err.message, true);
@@ -433,7 +601,6 @@ const loadUserWorkspaceData = useCallback(async () => {
     }
   };
 
-  // Candidate Submits Application
   const handleSubmitApplication = async (formPayload) => {
     try {
       const created = await apiSubmitApplication(formPayload);
@@ -453,7 +620,10 @@ const loadUserWorkspaceData = useCallback(async () => {
 
   const handleToggleArchiveApplication = async (applicationId, archived) => {
     try {
-      const updated = await apiToggleArchiveApplication(applicationId, archived);
+      const updated = await apiToggleArchiveApplication(
+        applicationId,
+        archived
+      );
       setApplications((prev) =>
         prev.map((a) => (a.applicationId === applicationId ? updated : a))
       );
@@ -501,7 +671,10 @@ const loadUserWorkspaceData = useCallback(async () => {
       const res = await apiAuthRequest("profile", nextUser);
       setUser(res.user);
       localStorage.setItem("nexus_user", JSON.stringify(res.user));
-      showToast(toastTitle, "Your candidate dossier is synchronized with Atlas.");
+      showToast(
+        toastTitle,
+        "Your candidate dossier is synchronized with Atlas."
+      );
       return true;
     } catch (err) {
       showToast("Update Error", err.message, true);
@@ -592,7 +765,10 @@ const loadUserWorkspaceData = useCallback(async () => {
     }
   };
 
-  const handleEmployerUpdateAppStatus = async (applicationId, statusPayload) => {
+  const handleEmployerUpdateAppStatus = async (
+    applicationId,
+    statusPayload
+  ) => {
     try {
       const updated = await apiUpdateApplicationStatus(
         applicationId,
@@ -611,6 +787,7 @@ const loadUserWorkspaceData = useCallback(async () => {
       return false;
     }
   };
+
   const handleAdminModerateJob = async (jobId, status, reason) => {
     try {
       const updated = await apiAdminModerateJob(jobId, status, reason);
@@ -620,8 +797,10 @@ const loadUserWorkspaceData = useCallback(async () => {
       showToast(
         status === "Removed"
           ? `Requisition #${jobId} Removed`
-          : `Requisition #${jobId} Restored`,
-        `Action logged to immutable SHA-256 Audit Trail.`,
+          : status === "Hidden"
+          ? `Requisition #${jobId} Hidden`
+          : `Requisition #${jobId} Approved & Unhidden`,
+        "Action logged to immutable SHA-256 Audit Trail.",
         status === "Removed"
       );
       return true;
@@ -633,7 +812,11 @@ const loadUserWorkspaceData = useCallback(async () => {
 
   const handleAdminToggleUserStatus = async (userId, nextStatus, reason) => {
     try {
-      const updated = await apiAdminToggleUserStatus(userId, nextStatus, reason);
+      const updated = await apiAdminToggleUserStatus(
+        userId,
+        nextStatus,
+        reason
+      );
       setPlatformUsers((prev) =>
         prev.map((u) => (String(u.id) === String(userId) ? updated : u))
       );
@@ -668,6 +851,8 @@ const loadUserWorkspaceData = useCallback(async () => {
     filteredJobs,
     companies,
     applications,
+    platformUsers,
+    auditLogs,
     selectedJob,
     selectedJobId,
     setSelectedJobId,
@@ -711,6 +896,7 @@ const loadUserWorkspaceData = useCallback(async () => {
     handleAuthenticate,
     handleSubmitApplication,
     handleToggleArchiveApplication,
+    handleRespondToOffer,
     handleUpdateProfile,
     handleUpdatePassword,
     handleSaveCompanyProfile,
@@ -718,11 +904,8 @@ const loadUserWorkspaceData = useCallback(async () => {
     handleEmployerUpdateJob,
     handleEmployerDeleteJob,
     handleEmployerUpdateAppStatus,
-    reloadPortalData: loadPublicData,
-    platformUsers, 
-    auditLogs, 
     handleAdminModerateJob,
     handleAdminToggleUserStatus,
-    handleRespondToOffer,
+    reloadPortalData: loadPublicData,
   };
 }
